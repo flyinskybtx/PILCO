@@ -1,18 +1,22 @@
 import tensorflow as tf
 import gpflow
 import numpy as np
-float_type = gpflow.settings.dtypes.float_type
+
+float_type = gpflow.default_float
+
 
 def randomize(model):
-    mean = 1; sigma = 0.01
+    mean = 1
+    sigma = 0.01
 
     model.kern.lengthscales.assign(
-        mean + sigma*np.random.normal(size=model.kern.lengthscales.shape))
+        mean + sigma * np.random.normal(size=model.kern.lengthscales.shape))
     model.kern.variance.assign(
-        mean + sigma*np.random.normal(size=model.kern.variance.shape))
+        mean + sigma * np.random.normal(size=model.kern.variance.shape))
     if model.likelihood.variance.trainable:
         model.likelihood.variance.assign(
-            mean + sigma*np.random.normal())
+            mean + sigma * np.random.normal())
+
 
 class MGPR(gpflow.Parameterized):
     def __init__(self, X, Y, name=None):
@@ -29,16 +33,17 @@ class MGPR(gpflow.Parameterized):
         self.models = []
         for i in range(self.num_outputs):
             kern = gpflow.kernels.RBF(input_dim=X.shape[1], ARD=True)
-            #TODO: Maybe fix noise for better conditioning
-            kern.lengthscales.prior = gpflow.priors.Gamma(1,10) # priors have to be included before
-            kern.variance.prior = gpflow.priors.Gamma(1.5,2)    # before the model gets compiled
-            self.models.append(gpflow.models.GPR(X, Y[:, i:i+1], kern))
-            self.models[i].clear(); self.models[i].compile()
+            # TODO: Maybe fix noise for better conditioning
+            kern.lengthscales.prior = gpflow.priors.Gamma(1, 10)  # priors have to be included before
+            kern.variance.prior = gpflow.priors.Gamma(1.5, 2)  # before the model gets compiled
+            self.models.append(gpflow.models.GPR(X, Y[:, i:i + 1], kern))
+            self.models[i].clear();
+            self.models[i].compile()
 
     def set_XY(self, X, Y):
         for i in range(len(self.models)):
             self.models[i].X = X
-            self.models[i].Y = Y[:, i:i+1]
+            self.models[i].Y = Y[:, i:i + 1]
 
     def optimize(self, restarts=1):
         if len(self.optimizers) == 0:  # This is the first call to optimize();
@@ -56,8 +61,8 @@ class MGPR(gpflow.Parameterized):
             for restart in range(restarts):
                 randomize(model)
                 optimizer._optimizer.minimize(session=session,
-                            feed_dict=optimizer._gen_feed_dict(optimizer._model, None),
-                            step_callback=None)
+                                              feed_dict=optimizer._gen_feed_dict(optimizer._model, None),
+                                              step_callback=None)
                 likelihood = model.compute_log_likelihood()
                 if likelihood > best_likelihood:
                     best_parameters = model.read_values(session=session)
@@ -71,7 +76,7 @@ class MGPR(gpflow.Parameterized):
     def calculate_factorizations(self):
         K = self.K(self.X)
         batched_eye = tf.eye(tf.shape(self.X)[0], batch_shape=[self.num_outputs], dtype=float_type)
-        L = tf.cholesky(K + self.noise[:, None, None]*batched_eye)
+        L = tf.cholesky(K + self.noise[:, None, None] * batched_eye)
         iK = tf.cholesky_solve(L, batched_eye)
         Y_ = tf.transpose(self.Y)[:, :, None]
         # Why do we transpose Y? Maybe we need to change the definition of self.Y() or beta?
@@ -90,17 +95,17 @@ class MGPR(gpflow.Parameterized):
         inp = tf.tile(self.centralized_input(m)[None, :, :], [self.num_outputs, 1, 1])
 
         # Calculate M and V: mean and inv(s) times input-output covariance
-        iL = tf.matrix_diag(1/self.lengthscales)
+        iL = tf.matrix_diag(1 / self.lengthscales)
         iN = inp @ iL
         B = iL @ s[0, ...] @ iL + tf.eye(self.num_dims, dtype=float_type)
 
         # Redefine iN as in^T and t --> t^T
         # B is symmetric so its the same
         t = tf.linalg.transpose(
-                tf.matrix_solve(B, tf.linalg.transpose(iN), adjoint=True),
-            )
+            tf.matrix_solve(B, tf.linalg.transpose(iN), adjoint=True),
+        )
 
-        lb = tf.exp(-tf.reduce_sum(iN * t, -1)/2) * beta
+        lb = tf.exp(-tf.reduce_sum(iN * t, -1) / 2) * beta
         tiL = t @ iL
         c = self.variance / tf.sqrt(tf.linalg.det(B))
 
@@ -109,26 +114,26 @@ class MGPR(gpflow.Parameterized):
 
         # Calculate S: Predictive Covariance
         R = s @ tf.matrix_diag(
-                1/tf.square(self.lengthscales[None, :, :]) +
-                1/tf.square(self.lengthscales[:, None, :])
-            ) + tf.eye(self.num_dims, dtype=float_type)
+            1 / tf.square(self.lengthscales[None, :, :]) +
+            1 / tf.square(self.lengthscales[:, None, :])
+        ) + tf.eye(self.num_dims, dtype=float_type)
 
         # TODO: change this block according to the PR of tensorflow. Maybe move it into a function?
-        X = inp[None, :, :, :]/tf.square(self.lengthscales[:, None, None, :])
-        X2 = -inp[:, None, :, :]/tf.square(self.lengthscales[None, :, None, :])
-        Q = tf.matrix_solve(R, s)/2
+        X = inp[None, :, :, :] / tf.square(self.lengthscales[:, None, None, :])
+        X2 = -inp[:, None, :, :] / tf.square(self.lengthscales[None, :, None, :])
+        Q = tf.matrix_solve(R, s) / 2
         Xs = tf.reduce_sum(X @ Q * X, -1)
         X2s = tf.reduce_sum(X2 @ Q * X2, -1)
         maha = -2 * tf.matmul(X @ Q, X2, adjoint_b=True) + \
-            Xs[:, :, :, None] + X2s[:, :, None, :]
+               Xs[:, :, :, None] + X2s[:, :, None, :]
         #
         k = tf.log(self.variance)[:, None] - \
-            tf.reduce_sum(tf.square(iN), -1)/2
+            tf.reduce_sum(tf.square(iN), -1) / 2
         L = tf.exp(k[:, None, :, None] + k[None, :, None, :] + maha)
         S = (tf.tile(beta[:, None, None, :], [1, self.num_outputs, 1, 1])
-                @ L @
-                tf.tile(beta[None, :, :, None], [self.num_outputs, 1, 1, 1])
-            )[:, :, 0, 0]
+             @ L @
+             tf.tile(beta[None, :, :, None], [self.num_outputs, 1, 1, 1])
+             )[:, :, 0, 0]
 
         diagL = tf.transpose(tf.linalg.diag_part(tf.transpose(L)))
         S = S - tf.diag(tf.reduce_sum(tf.multiply(iK, diagL), [1, 2]))
@@ -150,7 +155,7 @@ class MGPR(gpflow.Parameterized):
     def Y(self):
         return tf.concat(
             [model.Y.parameter_tensor for model in self.models],
-            axis = 1
+            axis=1
         )
 
     @property
